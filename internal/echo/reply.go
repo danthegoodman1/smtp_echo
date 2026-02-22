@@ -422,13 +422,13 @@ func addressDomain(address string) (string, error) {
 func (r *Replier) sendToHost(host string, recipient string, message []byte) error {
 	address := net.JoinHostPort(host, "25")
 
-	client, tlsEnabled, err := dialSMTPClient(address, host)
+	client, _, err := dialSMTPClient(address, host)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	if !tlsEnabled && r.hostname != "" {
+	if r.hostname != "" {
 		if err := client.Hello(r.hostname); err != nil {
 			return fmt.Errorf("helo/ehlo failed: %w", err)
 		}
