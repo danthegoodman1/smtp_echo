@@ -99,8 +99,8 @@ func TestReplierEcho_EnvelopeRecipientAndThreadHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readReplyBody() error = %v", err)
 	}
-	if !strings.Contains(body, "Body line 1") || !strings.Contains(body, "Body line 2") {
-		t.Fatalf("reply body does not include expected content, got: %q", body)
+	if !strings.Contains(body.Plain, "Body line 1") || !strings.Contains(body.Plain, "Body line 2") {
+		t.Fatalf("reply plain body does not include expected content, got: %q", body.Plain)
 	}
 }
 
@@ -164,5 +164,138 @@ func TestSelectReplyRecipient_FallbackOrder(t *testing.T) {
 				t.Fatalf("selectReplyRecipient() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReadReplyBody_PrefersPlainTextPart(t *testing.T) {
+	inbound := strings.Join([]string{
+		"From: sender@example.net",
+		"To: echo@example.com",
+		"Subject: multipart",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/alternative; boundary="part-boundary"`,
+		"",
+		"--part-boundary",
+		`Content-Type: text/plain; charset="UTF-8"`,
+		"",
+		"Hopefully you echo this back to me!",
+		"--part-boundary",
+		`Content-Type: text/html; charset="UTF-8"`,
+		"",
+		"<div dir=\"ltr\">Hopefully you echo this back to me!</div>",
+		"--part-boundary--",
+		"",
+	}, "\r\n")
+
+	reader, err := mail.CreateReader(strings.NewReader(inbound))
+	if err != nil {
+		t.Fatalf("CreateReader() error = %v", err)
+	}
+
+	body, err := readReplyBody(reader, []byte(inbound))
+	if err != nil {
+		t.Fatalf("readReplyBody() error = %v", err)
+	}
+
+	if !strings.Contains(body.Plain, "Hopefully you echo this back to me!") {
+		t.Fatalf("plain body missing expected text, got: %q", body.Plain)
+	}
+	if !strings.Contains(body.HTML, "<div dir=\"ltr\">Hopefully you echo this back to me!</div>") {
+		t.Fatalf("html body missing expected markup, got: %q", body.HTML)
+	}
+}
+
+func TestReadReplyBody_HTMLFallbackStripsMarkup(t *testing.T) {
+	inbound := strings.Join([]string{
+		"From: sender@example.net",
+		"To: echo@example.com",
+		"Subject: html-only",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/alternative; boundary="html-boundary"`,
+		"",
+		"--html-boundary",
+		`Content-Type: text/html; charset="UTF-8"`,
+		"",
+		"<div dir=\"ltr\">Hello <b>there</b>&amp;friends</div>",
+		"--html-boundary--",
+		"",
+	}, "\r\n")
+
+	reader, err := mail.CreateReader(strings.NewReader(inbound))
+	if err != nil {
+		t.Fatalf("CreateReader() error = %v", err)
+	}
+
+	body, err := readReplyBody(reader, []byte(inbound))
+	if err != nil {
+		t.Fatalf("readReplyBody() error = %v", err)
+	}
+
+	if !strings.Contains(body.HTML, "<div dir=\"ltr\">Hello <b>there</b>&amp;friends</div>") {
+		t.Fatalf("html body should preserve original markup, got: %q", body.HTML)
+	}
+	if body.Plain != "Hello there &friends" {
+		t.Fatalf("plain body = %q, want %q", body.Plain, "Hello there &friends")
+	}
+}
+
+func TestReplierEcho_MultipartReplyContainsPlainAndHTML(t *testing.T) {
+	cfg := config.Config{
+		Hostname: "echo.example.com",
+		Reply: config.ReplyConfig{
+			FromAddress: "echo@example.com",
+			MailFrom:    "bounce@example.com",
+		},
+	}
+
+	replier := NewReplier(cfg, log.New(io.Discard, "", 0))
+
+	var deliveredMessage []byte
+	replier.deliverFn = func(_ context.Context, _ string, message []byte) error {
+		deliveredMessage = append([]byte(nil), message...)
+		return nil
+	}
+
+	inbound := strings.Join([]string{
+		"From: sender@example.net",
+		"To: echo@example.com",
+		"Subject: multipart",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/alternative; boundary="reply-boundary"`,
+		"",
+		"--reply-boundary",
+		`Content-Type: text/plain; charset="UTF-8"`,
+		"",
+		"Plain part",
+		"--reply-boundary",
+		`Content-Type: text/html; charset="UTF-8"`,
+		"",
+		"<div><b>HTML</b> part</div>",
+		"--reply-boundary--",
+		"",
+	}, "\r\n")
+
+	if err := replier.Echo(context.Background(), InboundMessage{
+		EnvelopeFrom: "sender@example.net",
+		Data:         []byte(inbound),
+	}); err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+
+	replyText := string(deliveredMessage)
+	if !strings.Contains(replyText, "Content-Type: multipart/alternative;") {
+		t.Fatalf("reply should be multipart/alternative, got:\n%s", replyText)
+	}
+	if !strings.Contains(replyText, "Content-Type: text/plain; charset=utf-8") {
+		t.Fatalf("reply missing text/plain part, got:\n%s", replyText)
+	}
+	if !strings.Contains(replyText, "Content-Type: text/html; charset=utf-8") {
+		t.Fatalf("reply missing text/html part, got:\n%s", replyText)
+	}
+	if !strings.Contains(replyText, "Plain part") {
+		t.Fatalf("reply missing plain payload, got:\n%s", replyText)
+	}
+	if !strings.Contains(replyText, "<div><b>HTML</b> part</div>") {
+		t.Fatalf("reply missing html payload, got:\n%s", replyText)
 	}
 }

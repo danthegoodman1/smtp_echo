@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"log"
+	"mime"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -79,6 +82,11 @@ type threadMetadata struct {
 	References []string
 }
 
+type replyBody struct {
+	Plain string
+	HTML  string
+}
+
 func extractThreadMetadata(header mail.Header) threadMetadata {
 	meta := threadMetadata{}
 
@@ -144,8 +152,9 @@ func normalizeRecipientAddress(value string) string {
 	return ""
 }
 
-func readReplyBody(reader *mail.Reader, originalData []byte) (string, error) {
-	var segments []string
+func readReplyBody(reader *mail.Reader, originalData []byte) (replyBody, error) {
+	var plainSegments []string
+	var htmlSegments []string
 
 	for {
 		part, err := reader.NextPart()
@@ -153,7 +162,7 @@ func readReplyBody(reader *mail.Reader, originalData []byte) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("read message part: %w", err)
+			return replyBody{}, fmt.Errorf("read message part: %w", err)
 		}
 
 		contentDisposition := strings.ToLower(part.Header.Get("Content-Disposition"))
@@ -163,20 +172,61 @@ func readReplyBody(reader *mail.Reader, originalData []byte) (string, error) {
 
 		partBytes, err := io.ReadAll(part.Body)
 		if err != nil {
-			return "", fmt.Errorf("read message part body: %w", err)
+			return replyBody{}, fmt.Errorf("read message part body: %w", err)
 		}
 		if len(partBytes) == 0 {
 			continue
 		}
 
-		segments = append(segments, string(partBytes))
+		switch normalizeMediaType(part.Header.Get("Content-Type")) {
+		case "", "text/plain":
+			plainSegments = append(plainSegments, string(partBytes))
+		case "text/html":
+			htmlSegments = append(htmlSegments, string(partBytes))
+		}
 	}
 
-	if len(segments) > 0 {
-		return strings.Join(segments, "\n\n"), nil
+	body := replyBody{
+		Plain: strings.Join(plainSegments, "\n\n"),
+		HTML:  strings.Join(htmlSegments, "\n\n"),
 	}
 
-	return extractRawBody(originalData), nil
+	if body.Plain == "" && body.HTML == "" {
+		rawBody := extractRawBody(originalData)
+		switch normalizeMediaType(reader.Header.Get("Content-Type")) {
+		case "text/html":
+			body.HTML = rawBody
+			body.Plain = htmlToText(rawBody)
+		default:
+			body.Plain = rawBody
+		}
+	}
+
+	if body.Plain == "" && body.HTML != "" {
+		body.Plain = htmlToText(body.HTML)
+	}
+
+	return body, nil
+}
+
+func normalizeMediaType(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	}
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+var htmlTagPattern = regexp.MustCompile(`(?s)<[^>]*>`)
+
+func htmlToText(input string) string {
+	withoutTags := htmlTagPattern.ReplaceAllString(input, " ")
+	unescaped := stdhtml.UnescapeString(withoutTags)
+	return strings.TrimSpace(strings.Join(strings.Fields(unescaped), " "))
 }
 
 func extractRawBody(data []byte) string {
@@ -189,7 +239,7 @@ func extractRawBody(data []byte) string {
 	return ""
 }
 
-func (r *Replier) buildReplyMessage(recipient string, body string, meta threadMetadata) ([]byte, error) {
+func (r *Replier) buildReplyMessage(recipient string, body replyBody, meta threadMetadata) ([]byte, error) {
 	fromAddress, err := mail.ParseAddress(r.fromAddress)
 	if err != nil {
 		return nil, fmt.Errorf("invalid configured from_address: %w", err)
@@ -226,22 +276,75 @@ func (r *Replier) buildReplyMessage(recipient string, body string, meta threadMe
 		}
 	}
 
-	if body == "" {
-		body = "\n"
-	}
-
 	var buf bytes.Buffer
-	inlineWriter, err := mail.CreateSingleInlineWriter(&buf, header)
-	if err != nil {
-		return nil, fmt.Errorf("create reply writer: %w", err)
+	plainBody := body.Plain
+	htmlBody := body.HTML
+	if plainBody == "" && htmlBody == "" {
+		plainBody = "\n"
 	}
 
-	if _, err := io.WriteString(inlineWriter, body); err != nil {
-		return nil, fmt.Errorf("write reply body: %w", err)
+	if htmlBody == "" {
+		inlineWriter, err := mail.CreateSingleInlineWriter(&buf, header)
+		if err != nil {
+			return nil, fmt.Errorf("create reply writer: %w", err)
+		}
+		if _, err := io.WriteString(inlineWriter, plainBody); err != nil {
+			return nil, fmt.Errorf("write reply body: %w", err)
+		}
+		if err := inlineWriter.Close(); err != nil {
+			return nil, fmt.Errorf("close reply writer: %w", err)
+		}
+		return buf.Bytes(), nil
+	}
+
+	if plainBody == "" {
+		plainBody = htmlToText(htmlBody)
+		if plainBody == "" {
+			plainBody = "\n"
+		}
+	}
+
+	writer, err := mail.CreateWriter(&buf, header)
+	if err != nil {
+		return nil, fmt.Errorf("create multipart reply writer: %w", err)
+	}
+
+	inlineWriter, err := writer.CreateInline()
+	if err != nil {
+		return nil, fmt.Errorf("create inline writer: %w", err)
+	}
+
+	var plainHeader mail.InlineHeader
+	plainHeader.SetContentType("text/plain", map[string]string{"charset": "utf-8"})
+	plainPart, err := inlineWriter.CreatePart(plainHeader)
+	if err != nil {
+		return nil, fmt.Errorf("create plain part: %w", err)
+	}
+	if _, err := io.WriteString(plainPart, plainBody); err != nil {
+		return nil, fmt.Errorf("write plain part: %w", err)
+	}
+	if err := plainPart.Close(); err != nil {
+		return nil, fmt.Errorf("close plain part: %w", err)
+	}
+
+	var htmlHeader mail.InlineHeader
+	htmlHeader.SetContentType("text/html", map[string]string{"charset": "utf-8"})
+	htmlPart, err := inlineWriter.CreatePart(htmlHeader)
+	if err != nil {
+		return nil, fmt.Errorf("create html part: %w", err)
+	}
+	if _, err := io.WriteString(htmlPart, htmlBody); err != nil {
+		return nil, fmt.Errorf("write html part: %w", err)
+	}
+	if err := htmlPart.Close(); err != nil {
+		return nil, fmt.Errorf("close html part: %w", err)
 	}
 
 	if err := inlineWriter.Close(); err != nil {
-		return nil, fmt.Errorf("close reply writer: %w", err)
+		return nil, fmt.Errorf("close inline writer: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
 	}
 
 	return buf.Bytes(), nil
