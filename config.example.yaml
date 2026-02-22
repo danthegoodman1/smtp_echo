@@ -1,0 +1,9 @@
+listen_addr: ":25"
+hostname: "mail.example.com"
+read_timeout: "30s"
+write_timeout: "30s"
+max_message_bytes: 10485760
+reply:
+  from_address: "echo@mail.example.com"
+  mail_from: "bounce@mail.example.com"
+  from_name: "SMTP Echo"
