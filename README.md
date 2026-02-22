@@ -22,28 +22,28 @@ Copy `config.example.yaml` to `config.yaml` and edit values:
 
 ## DNS requirements
 
-If you are using `mailtest.httpkv.com` as your mail subdomain, set:
+If you are using `mailtest.example.com` as your mail subdomain, set:
 
-- `A` `mailtest.httpkv.com` -> `<server_public_ip>`
-- `MX` `mailtest.httpkv.com` -> `10 mailtest.httpkv.com`
-- `PTR` `<server_public_ip>` -> `mailtest.httpkv.com` (set at your provider)
-- `TXT` `mailtest.httpkv.com` -> `"v=spf1 ip4:<server_public_ip> -all"`
-- `TXT` `_dmarc.mailtest.httpkv.com` -> `"v=DMARC1; p=none; rua=mailto:dmarc@httpkv.com"`
+- `A` `mailtest.example.com` -> `<server_public_ip>`
+- `MX` `mailtest.example.com` -> `10 mailtest.example.com`
+- `PTR` `<server_public_ip>` -> `mailtest.example.com` (set at your provider)
+- `TXT` `mailtest.example.com` -> `"v=spf1 ip4:<server_public_ip> -all"`
+- `TXT` `_dmarc.mailtest.example.com` -> `"v=DMARC1; p=none; rua=mailto:dmarc@example.com"`
 
 Notes:
 
-- if your recipient addresses are `user@mailtest.httpkv.com`, the MX must exist on `mailtest.httpkv.com`
-- DMARC on `_dmarc.mailtest.httpkv.com` is enough for `From: *@mailtest.httpkv.com`
+- if your recipient addresses are `user@mailtest.example.com`, the MX must exist on `mailtest.example.com`
+- DMARC on `_dmarc.mailtest.example.com` is enough for `From: *@mailtest.example.com`
 - `p=none` is a monitor-only DMARC policy and is a good starting point
 
 Quick checks:
 
 ```bash
-dig +short A mailtest.httpkv.com
-dig +short MX mailtest.httpkv.com
+dig +short A mailtest.example.com
+dig +short MX mailtest.example.com
 dig +short -x <server_public_ip>
-dig +short TXT mailtest.httpkv.com
-dig +short TXT _dmarc.mailtest.httpkv.com
+dig +short TXT mailtest.example.com
+dig +short TXT _dmarc.mailtest.example.com
 ```
 
 ## Run
