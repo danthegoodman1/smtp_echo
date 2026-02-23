@@ -17,12 +17,20 @@ type Config struct {
 	WriteTimeout    time.Duration `yaml:"write_timeout"`
 	MaxMessageBytes int64         `yaml:"max_message_bytes"`
 	Reply           ReplyConfig   `yaml:"reply"`
+	DKIM            *DKIMConfig   `yaml:"dkim"`
 }
 
 type ReplyConfig struct {
 	FromAddress string `yaml:"from_address"`
 	MailFrom    string `yaml:"mail_from"`
 	FromName    string `yaml:"from_name"`
+}
+
+type DKIMConfig struct {
+	Domain         string `yaml:"domain"`
+	Selector       string `yaml:"selector"`
+	Identifier     string `yaml:"identifier"`
+	PrivateKeyPath string `yaml:"private_key_path"`
 }
 
 func Load(path string) (Config, error) {
@@ -77,6 +85,21 @@ func (c Config) validate() error {
 	}
 	if _, err := mail.ParseAddress(c.Reply.MailFrom); err != nil {
 		return fmt.Errorf("reply.mail_from invalid: %w", err)
+	}
+
+	if c.DKIM != nil {
+		if c.DKIM.Domain == "" {
+			return errors.New("dkim.domain is required when dkim section is present")
+		}
+		if c.DKIM.Selector == "" {
+			return errors.New("dkim.selector is required when dkim section is present")
+		}
+		if c.DKIM.PrivateKeyPath == "" {
+			return errors.New("dkim.private_key_path is required when dkim section is present")
+		}
+		if _, err := os.Stat(c.DKIM.PrivateKeyPath); err != nil {
+			return fmt.Errorf("dkim.private_key_path invalid: %w", err)
+		}
 	}
 
 	return nil

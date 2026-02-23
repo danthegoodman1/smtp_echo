@@ -33,7 +33,10 @@ func run() error {
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
-	replier := echo.NewReplier(cfg, logger)
+	replier, err := echo.NewReplier(cfg, logger)
+	if err != nil {
+		return err
+	}
 	backend := echo.NewBackend(replier, logger)
 
 	server := smtp.NewServer(backend)

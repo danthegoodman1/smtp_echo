@@ -3,8 +3,15 @@ package echo
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"log"
+	"os"
 	"strings"
 	"testing"
 
@@ -23,7 +30,10 @@ func TestReplierEcho_EnvelopeRecipientAndThreadHeaders(t *testing.T) {
 		},
 	}
 
-	replier := NewReplier(cfg, log.New(io.Discard, "", 0))
+	replier, err := NewReplier(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewReplier() error = %v", err)
+	}
 
 	var deliveredTo string
 	var deliveredMessage []byte
@@ -46,7 +56,7 @@ func TestReplierEcho_EnvelopeRecipientAndThreadHeaders(t *testing.T) {
 		"",
 	}, "\r\n")
 
-	err := replier.Echo(context.Background(), InboundMessage{
+	err = replier.Echo(context.Background(), InboundMessage{
 		EnvelopeFrom: "envelope-sender@example.net",
 		Data:         []byte(inbound),
 	})
@@ -248,7 +258,10 @@ func TestReplierEcho_MultipartReplyContainsPlainAndHTML(t *testing.T) {
 		},
 	}
 
-	replier := NewReplier(cfg, log.New(io.Discard, "", 0))
+	replier, err := NewReplier(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewReplier() error = %v", err)
+	}
 
 	var deliveredMessage []byte
 	replier.deliverFn = func(_ context.Context, _ string, message []byte) error {
@@ -297,5 +310,109 @@ func TestReplierEcho_MultipartReplyContainsPlainAndHTML(t *testing.T) {
 	}
 	if !strings.Contains(replyText, "<div><b>HTML</b> part</div>") {
 		t.Fatalf("reply missing html payload, got:\n%s", replyText)
+	}
+}
+
+func TestReplierEcho_DKIMSignatureAddedWhenEnabled(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+
+	keyPath := t.TempDir() + "/dkim-private.pem"
+	if err := os.WriteFile(keyPath, privateKeyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := config.Config{
+		Hostname: "mailtest.example.com",
+		Reply: config.ReplyConfig{
+			FromAddress: "echo@mailtest.example.com",
+			MailFrom:    "bounce@mailtest.example.com",
+		},
+		DKIM: &config.DKIMConfig{
+			Domain:         "mailtest.example.com",
+			Selector:       "s1",
+			PrivateKeyPath: keyPath,
+		},
+	}
+
+	replier, err := NewReplier(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewReplier() error = %v", err)
+	}
+
+	var deliveredMessage []byte
+	replier.deliverFn = func(_ context.Context, _ string, message []byte) error {
+		deliveredMessage = append([]byte(nil), message...)
+		return nil
+	}
+
+	inbound := strings.Join([]string{
+		"From: sender@example.net",
+		"To: echo@example.com",
+		"Subject: dkim",
+		"",
+		"hello",
+		"",
+	}, "\r\n")
+
+	if err := replier.Echo(context.Background(), InboundMessage{
+		EnvelopeFrom: "sender@example.net",
+		Data:         []byte(inbound),
+	}); err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+
+	if !strings.Contains(string(deliveredMessage), "DKIM-Signature:") {
+		t.Fatalf("expected DKIM-Signature header, got:\n%s", string(deliveredMessage))
+	}
+}
+
+func TestNewReplier_DKIMRejectsNonRSAKey(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+
+	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(ecKey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey() error = %v", err)
+	}
+
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: pkcs8Bytes,
+	})
+
+	keyPath := t.TempDir() + "/dkim-private.pem"
+	if err := os.WriteFile(keyPath, privateKeyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := config.Config{
+		Hostname: "mailtest.example.com",
+		Reply: config.ReplyConfig{
+			FromAddress: "echo@mailtest.example.com",
+			MailFrom:    "bounce@mailtest.example.com",
+		},
+		DKIM: &config.DKIMConfig{
+			Domain:         "mailtest.example.com",
+			Selector:       "s1",
+			PrivateKeyPath: keyPath,
+		},
+	}
+
+	_, err = NewReplier(cfg, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatalf("NewReplier() expected error for non-RSA DKIM key")
+	}
+	if !strings.Contains(err.Error(), "use RSA private key") {
+		t.Fatalf("NewReplier() error = %q, expected RSA guidance", err)
 	}
 }

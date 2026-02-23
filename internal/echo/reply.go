@@ -3,13 +3,18 @@ package echo
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	stdhtml "html"
 	"io"
 	"log"
 	"mime"
 	"net"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,6 +22,7 @@ import (
 
 	_ "github.com/emersion/go-message/charset"
 	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-msgauth/dkim"
 	"github.com/emersion/go-smtp"
 
 	"github.com/danthegoodman1/smtp_echo/internal/config"
@@ -29,9 +35,10 @@ type Replier struct {
 	fromName    string
 	logger      *log.Logger
 	deliverFn   func(ctx context.Context, to string, message []byte) error
+	dkimOptions *dkim.SignOptions
 }
 
-func NewReplier(cfg config.Config, logger *log.Logger) *Replier {
+func NewReplier(cfg config.Config, logger *log.Logger) (*Replier, error) {
 	replier := &Replier{
 		hostname:    cfg.Hostname,
 		fromAddress: cfg.Reply.FromAddress,
@@ -40,7 +47,10 @@ func NewReplier(cfg config.Config, logger *log.Logger) *Replier {
 		logger:      logger,
 	}
 	replier.deliverFn = replier.deliverDirect
-	return replier
+	if err := replier.configureDKIM(cfg.DKIM); err != nil {
+		return nil, err
+	}
+	return replier, nil
 }
 
 func (r *Replier) Echo(ctx context.Context, msg InboundMessage) error {
@@ -64,6 +74,10 @@ func (r *Replier) Echo(ctx context.Context, msg InboundMessage) error {
 	if err != nil {
 		return err
 	}
+	replyMessage, err = r.signMessage(replyMessage)
+	if err != nil {
+		return err
+	}
 
 	if err := r.deliverFn(ctx, recipient, replyMessage); err != nil {
 		return err
@@ -74,6 +88,87 @@ func (r *Replier) Echo(ctx context.Context, msg InboundMessage) error {
 	}
 
 	return nil
+}
+
+func (r *Replier) configureDKIM(cfg *config.DKIMConfig) error {
+	if cfg == nil {
+		return nil
+	}
+
+	signer, err := loadSignerFromPEM(cfg.PrivateKeyPath)
+	if err != nil {
+		return fmt.Errorf("load dkim private key: %w", err)
+	}
+
+	r.dkimOptions = &dkim.SignOptions{
+		Domain:     cfg.Domain,
+		Selector:   cfg.Selector,
+		Identifier: cfg.Identifier,
+		Signer:     signer,
+		HeaderKeys: []string{
+			"From",
+			"To",
+			"Subject",
+			"Date",
+			"Message-ID",
+			"In-Reply-To",
+			"References",
+			"MIME-Version",
+			"Content-Type",
+		},
+	}
+
+	if r.logger != nil {
+		r.logger.Printf("dkim signing enabled domain=%q selector=%q", cfg.Domain, cfg.Selector)
+	}
+	return nil
+}
+
+func (r *Replier) signMessage(message []byte) ([]byte, error) {
+	if r.dkimOptions == nil {
+		return message, nil
+	}
+
+	var signed bytes.Buffer
+	if err := dkim.Sign(&signed, bytes.NewReader(message), r.dkimOptions); err != nil {
+		return nil, fmt.Errorf("sign dkim: %w", err)
+	}
+	return signed.Bytes(), nil
+}
+
+func loadSignerFromPEM(path string) (crypto.Signer, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode pem block")
+	}
+
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PKCS#1 RSA private key: %w", err)
+		}
+		return key, nil
+	case "PRIVATE KEY":
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PKCS#8 private key: %w", err)
+		}
+		rsaKey, ok := key.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("unsupported PKCS#8 key type %T: use RSA private key", key)
+		}
+		return rsaKey, nil
+	case "ENCRYPTED PRIVATE KEY":
+		return nil, fmt.Errorf("encrypted private keys are not supported")
+	default:
+		return nil, fmt.Errorf("unsupported PEM block type %q: expected RSA PRIVATE KEY or PRIVATE KEY", block.Type)
+	}
 }
 
 type threadMetadata struct {

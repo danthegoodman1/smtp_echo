@@ -19,6 +19,7 @@ Copy `config.example.yaml` to `config.yaml` and edit values:
 - `reply.from_address`: visible `From:` in echoed reply
 - `reply.mail_from`: SMTP envelope sender for outbound `MAIL FROM`
 - `reply.from_name`: optional display name
+- `dkim`: optional DKIM signing config for better deliverability
 
 ## DNS requirements
 
@@ -29,12 +30,14 @@ If you are using `mailtest.example.com` as your mail subdomain, set:
 - `PTR` `<server_public_ip>` -> `mailtest.example.com` (set at your provider)
 - `TXT` `mailtest.example.com` -> `"v=spf1 ip4:<server_public_ip> -all"`
 - `TXT` `_dmarc.mailtest.example.com` -> `"v=DMARC1; p=none; rua=mailto:dmarc@example.com"`
+- `TXT` `s1._domainkey.mailtest.example.com` -> `"v=DKIM1; k=rsa; p=<public_key_base64>"` (optional, recommended)
 
 Notes:
 
 - if your recipient addresses are `user@mailtest.example.com`, the MX must exist on `mailtest.example.com`
 - DMARC on `_dmarc.mailtest.example.com` is enough for `From: *@mailtest.example.com`
 - `p=none` is a monitor-only DMARC policy and is a good starting point
+- DKIM selector record name is `<selector>._domainkey.<dkim.domain>`
 
 Quick checks:
 
@@ -44,7 +47,34 @@ dig +short MX mailtest.example.com
 dig +short -x <server_public_ip>
 dig +short TXT mailtest.example.com
 dig +short TXT _dmarc.mailtest.example.com
+dig +short TXT s1._domainkey.mailtest.example.com
 ```
+
+## Optional DKIM
+
+Enable DKIM by adding a `dkim` section in `config.yaml` with:
+
+- `dkim.domain`
+- `dkim.selector`
+- `dkim.private_key_path`
+- `dkim.identifier` (optional)
+
+If the `dkim` section is absent, DKIM signing is disabled.
+
+Generate a keypair with OpenSSL:
+
+```bash
+openssl genrsa -out dkim-private.pem 2048
+openssl rsa -in dkim-private.pem -pubout -out dkim-public.pem
+```
+
+Then publish the public key in DNS at:
+
+- `<selector>._domainkey.<dkim.domain>`
+
+with TXT value:
+
+- `v=DKIM1; k=rsa; p=<public_key_base64_without_pem_markers>`
 
 ## Run
 

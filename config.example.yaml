@@ -7,3 +7,9 @@ reply:
   from_address: "echo@mail.example.com"
   mail_from: "bounce@mail.example.com"
   from_name: "SMTP Echo"
+# Uncomment this section to enable DKIM signing.
+# dkim:
+#   domain: "mail.example.com"
+#   selector: "s1"
+#   identifier: "echo@mail.example.com"
+#   private_key_path: "/etc/smtp-echo/dkim-private.pem"
